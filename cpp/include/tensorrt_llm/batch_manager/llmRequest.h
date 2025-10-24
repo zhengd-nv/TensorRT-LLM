@@ -195,7 +195,6 @@ public:
         , mNumReturnSequences(numReturnSequences)
         , mEagleConfig(std::move(eagleConfig))
         , mSkipCrossAttnBlocks(std::move(skipCrossAttnBlocks))
-        , mReturnPerfMetrics(returnPerfMetrics)
         , mGuidedDecodingParams(std::move(guidedDecodingParams))
         , mLanguageAdapterUid(languageAdapterUid)
         , mAllottedTimeMs(allottedTimeMs)
@@ -206,7 +205,7 @@ public:
             mState = LlmRequestState::kENCODER_INIT;
         }
 
-        initialize(*inputTokens, returnLogProbs, arrivalTime);
+        initialize(*inputTokens, returnLogProbs, returnPerfMetrics, arrivalTime);
     }
 
     GenericLlmRequest(RequestIdType requestId, SizeType32 maxNewTokens, VecTokens const& inputTokens,
@@ -302,7 +301,6 @@ public:
         , mEncoderOutputLength(req.getEncoderOutputLength())
         , mContextPhaseParams(req.getContextPhaseParams())
         , mEagleConfig(req.getEagleConfig())
-        , mReturnPerfMetrics(req.getOutputConfig().returnPerfMetrics)
         , mGuidedDecodingParams(req.getGuidedDecodingParams())
         , mLanguageAdapterUid(req.getLanguageAdapterUid())
         , mAllottedTimeMs(req.getAllottedTimeMs())
@@ -474,7 +472,8 @@ public:
         default: throw std::runtime_error("Unsupported request type found.");
         }
 
-        initialize(req.getInputTokenIds(), req.getOutputConfig().returnLogProbs);
+        initialize(
+            req.getInputTokenIds(), req.getOutputConfig().returnLogProbs, req.getOutputConfig().returnPerfMetrics);
     }
 
     GenericLlmRequest(GenericLlmRequest&& request) = default;
@@ -1144,7 +1143,7 @@ public:
 
         if (modelConfig.hasSpeculativeDecodingModule() && getReturnPerfMetrics() && hasDraftTokens())
         {
-            auto& specDecMetrics = mPerfMetrics.speculativeDecoding;
+            auto& specDecMetrics = mPerfMetrics->speculativeDecoding;
             specDecMetrics.totalAcceptedDraftTokens += mNumTokensPerIteration - 1;
             auto const maxAcceptedDraftTokens = modelConfig.getSpeculativeDecodingModule().getMaxDraftPathLen();
             specDecMetrics.totalDraftTokens += std::min(getNumDraftTokens(), maxAcceptedDraftTokens);
@@ -1240,24 +1239,26 @@ public:
 
     [[nodiscard]] bool constexpr getReturnPerfMetrics() const noexcept
     {
-        return mReturnPerfMetrics;
-    }
-
-    void constexpr setReturnPerfMetrics(bool returnPerfMetrics) noexcept
-    {
-        mReturnPerfMetrics = returnPerfMetrics;
+        return mPerfMetrics != nullptr;
     }
 
     [[nodiscard]] executor::RequestPerfMetrics const& getPerfMetrics() const noexcept
+    {
+        TLLM_CHECK_WITH_INFO(mPerfMetrics != nullptr, "Perf metrics is not enabled");
+        return *mPerfMetrics;
+    }
+
+    // for python binding
+    [[nodiscard]] std::shared_ptr<executor::RequestPerfMetrics const> getPerfMetricsPtr() const noexcept
     {
         return mPerfMetrics;
     }
 
     void setFirstScheduledTime()
     {
-        if (mPerfMetrics.timingMetrics.firstScheduledTime == executor::RequestPerfMetrics::TimePoint{})
+        if (mPerfMetrics && mPerfMetrics->timingMetrics.firstScheduledTime == executor::RequestPerfMetrics::TimePoint{})
         {
-            mPerfMetrics.timingMetrics.firstScheduledTime = getSteadyClockNow();
+            mPerfMetrics->timingMetrics.firstScheduledTime = getSteadyClockNow();
         }
     }
 
@@ -1693,76 +1694,104 @@ public:
 
     void setKvCacheTransferStart(TimePoint time) const
     {
-        mPerfMetrics.timingMetrics.kvCacheTransferStart = maybeToGlobalSteadyClock(time);
+        if (mPerfMetrics)
+        {
+            mPerfMetrics->timingMetrics.kvCacheTransferStart = maybeToGlobalSteadyClock(time);
+        }
     }
 
     void setKvCacheTransferEnd(TimePoint time) const
     {
-        mPerfMetrics.timingMetrics.kvCacheTransferEnd = maybeToGlobalSteadyClock(time);
+        if (mPerfMetrics)
+        {
+            mPerfMetrics->timingMetrics.kvCacheTransferEnd = maybeToGlobalSteadyClock(time);
+        }
     }
 
     TimePoint getKvCacheTransferStart() const
     {
-        return mPerfMetrics.timingMetrics.kvCacheTransferStart;
+        TLLM_CHECK(mPerfMetrics);
+        return mPerfMetrics->timingMetrics.kvCacheTransferStart;
     }
 
     TimePoint getKvCacheTransferEnd() const
     {
-        return mPerfMetrics.timingMetrics.kvCacheTransferEnd;
+        TLLM_CHECK(mPerfMetrics);
+        return mPerfMetrics->timingMetrics.kvCacheTransferEnd;
     }
 
     [[nodiscard]] double getKvCacheTransferTimeMS() const
     {
+        TLLM_CHECK(mPerfMetrics);
         // get max with 0 in case this function is called while end time is not recorded
         return std::max(0.0,
             std::chrono::duration<double, std::milli>(
-                mPerfMetrics.timingMetrics.kvCacheTransferEnd - mPerfMetrics.timingMetrics.kvCacheTransferStart)
+                mPerfMetrics->timingMetrics.kvCacheTransferEnd - mPerfMetrics->timingMetrics.kvCacheTransferStart)
                 .count());
     }
 
     void updateKvCacheSize(size_t targetBufferSize) const
     {
-        mPerfMetrics.timingMetrics.kvCacheSize += targetBufferSize;
+        if (mPerfMetrics)
+        {
+            mPerfMetrics->timingMetrics.kvCacheSize += targetBufferSize;
+        }
     }
 
     void setKvCacheSize(size_t targetBufferSize) const
     {
-        mPerfMetrics.timingMetrics.kvCacheSize = targetBufferSize;
+        if (mPerfMetrics)
+        {
+            mPerfMetrics->timingMetrics.kvCacheSize = targetBufferSize;
+        }
     }
 
     [[nodiscard]] size_t getKvCacheSize() const
     {
-        return mPerfMetrics.timingMetrics.kvCacheSize;
+        TLLM_CHECK(mPerfMetrics);
+        return mPerfMetrics->timingMetrics.kvCacheSize;
     }
 
     void updateAllocTotalBlocksPerRequest(SizeType32 allocTotalBlocksPerRequest)
     {
-        mPerfMetrics.kvCacheMetrics.numTotalAllocatedBlocks += allocTotalBlocksPerRequest;
+        if (mPerfMetrics)
+        {
+            mPerfMetrics->kvCacheMetrics.numTotalAllocatedBlocks += allocTotalBlocksPerRequest;
+        }
     }
 
     [[nodiscard]] SizeType32 getAllocTotalBlocksPerRequest() const
     {
-        return mPerfMetrics.kvCacheMetrics.numTotalAllocatedBlocks;
+        TLLM_CHECK(mPerfMetrics);
+        return mPerfMetrics->kvCacheMetrics.numTotalAllocatedBlocks;
     }
 
     void updateAllocNewBlocksPerRequest(SizeType32 allocNewBlocksPerRequest)
     {
-        mPerfMetrics.kvCacheMetrics.numNewAllocatedBlocks += allocNewBlocksPerRequest;
+        if (mPerfMetrics)
+        {
+            mPerfMetrics->kvCacheMetrics.numNewAllocatedBlocks += allocNewBlocksPerRequest;
+        }
     }
 
     [[nodiscard]] SizeType32 getAllocNewBlocksPerRequest() const
     {
-        return mPerfMetrics.kvCacheMetrics.numNewAllocatedBlocks;
+        TLLM_CHECK(mPerfMetrics);
+        return mPerfMetrics->kvCacheMetrics.numNewAllocatedBlocks;
     }
 
     void updateReusedBlocksPerRequest(SizeType32 reusedBlocksPerRequest)
     {
-        mPerfMetrics.kvCacheMetrics.numReusedBlocks += reusedBlocksPerRequest;
+        if (mPerfMetrics)
+        {
+            mPerfMetrics->kvCacheMetrics.numReusedBlocks += reusedBlocksPerRequest;
+        }
     }
 
     [[nodiscard]] SizeType32 getReusedBlocksPerRequest() const
     {
-        return mPerfMetrics.kvCacheMetrics.numReusedBlocks;
+        TLLM_CHECK(mPerfMetrics);
+        return mPerfMetrics->kvCacheMetrics.numReusedBlocks;
     }
 
     [[nodiscard]] std::optional<SizeType32> getLanguageAdapterUid() const
@@ -1809,39 +1838,48 @@ public:
 
     void updateMissedBlocksPerRequest(SizeType32 missedBlocksPerRequest)
     {
-        mPerfMetrics.kvCacheMetrics.numMissedBlocks += missedBlocksPerRequest;
+        if (mPerfMetrics)
+        {
+            mPerfMetrics->kvCacheMetrics.numMissedBlocks += missedBlocksPerRequest;
+        }
     }
 
     [[nodiscard]] SizeType32 getMissedBlocksPerRequest() const
     {
-        return mPerfMetrics.kvCacheMetrics.numMissedBlocks;
+        TLLM_CHECK(mPerfMetrics);
+        return mPerfMetrics->kvCacheMetrics.numMissedBlocks;
     }
 
     [[nodiscard]] float getKVCacheHitRatePerRequest() const
     {
-        return mPerfMetrics.kvCacheMetrics.numReusedBlocks == 0
+        TLLM_CHECK(mPerfMetrics);
+        return mPerfMetrics->kvCacheMetrics.numReusedBlocks == 0
             ? 0
-            : static_cast<float>(mPerfMetrics.kvCacheMetrics.numReusedBlocks)
+            : static_cast<float>(mPerfMetrics->kvCacheMetrics.numReusedBlocks)
                 / (static_cast<float>(
-                    mPerfMetrics.kvCacheMetrics.numReusedBlocks + mPerfMetrics.kvCacheMetrics.numMissedBlocks));
+                    mPerfMetrics->kvCacheMetrics.numReusedBlocks + mPerfMetrics->kvCacheMetrics.numMissedBlocks));
     }
 
     void updatePerfMetrics(executor::IterationType iter)
     {
+        if (!mPerfMetrics)
+        {
+            return;
+        }
         auto const currentTokenTime = getSteadyClockNow();
 
-        if (!mPerfMetrics.firstIter)
+        if (!mPerfMetrics->firstIter)
         {
-            mPerfMetrics.firstIter = iter;
-            mPerfMetrics.timingMetrics.firstTokenTime = currentTokenTime;
+            mPerfMetrics->firstIter = iter;
+            mPerfMetrics->timingMetrics.firstTokenTime = currentTokenTime;
         }
 
-        mPerfMetrics.iter = iter;
+        mPerfMetrics->iter = iter;
 
         if (isFinished())
         {
-            mPerfMetrics.lastIter = iter;
-            mPerfMetrics.timingMetrics.lastTokenTime = currentTokenTime;
+            mPerfMetrics->lastIter = iter;
+            mPerfMetrics->timingMetrics.lastTokenTime = currentTokenTime;
         }
     }
 
@@ -2026,9 +2064,8 @@ protected:
 
     std::optional<TensorPtr> mSkipCrossAttnBlocks{std::nullopt};
 
-    // Performance metrics. Should be updatable even from a const LlmRequest reference.
-    bool mReturnPerfMetrics{false};
-    mutable executor::RequestPerfMetrics mPerfMetrics;
+    // Performance metrics.
+    std::shared_ptr<executor::RequestPerfMetrics> mPerfMetrics;
 
     // Guided decoding params.
     std::optional<executor::GuidedDecodingParams> mGuidedDecodingParams{std::nullopt};
@@ -2054,8 +2091,8 @@ protected:
     std::optional<CacheSaltIDType> mCacheSaltID{std::nullopt};
 
 private:
-    void initialize(
-        VecTokens const& inputTokens, bool outputLogProbs, std::optional<TimePoint> arrivalTime = std::nullopt)
+    void initialize(VecTokens const& inputTokens, bool outputLogProbs, bool returnPerfMetrics = false,
+        std::optional<TimePoint> arrivalTime = std::nullopt)
     {
         if (mLlmRequestType == LlmRequestType::LLMREQUEST_TYPE_GENERATION_ONLY)
         {
@@ -2147,10 +2184,11 @@ private:
             mSequenceFinalVec = std::make_shared<std::vector<bool>>(getNumSubRequests(), false);
         }
 
-        if (mReturnPerfMetrics)
+        if (returnPerfMetrics)
         {
+            mPerfMetrics = std::make_shared<executor::RequestPerfMetrics>();
             // arrivalTime is assumed to be recorded at the rank 0, so no need to convert it to global clock
-            mPerfMetrics.timingMetrics.arrivalTime = arrivalTime.value_or(getSteadyClockNow());
+            mPerfMetrics->timingMetrics.arrivalTime = arrivalTime.value_or(getSteadyClockNow());
         }
         mStartTime = std::chrono::steady_clock::now();
     }

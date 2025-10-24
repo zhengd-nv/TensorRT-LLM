@@ -185,16 +185,16 @@ std::optional<executor::Result> LlmRequest::createResult(bool useFastLogits, int
 
     if (getReturnPerfMetrics())
     {
-        mPerfMetrics.kvCacheMetrics.kvCacheHitRate = getKVCacheHitRatePerRequest();
+        mPerfMetrics->kvCacheMetrics.kvCacheHitRate = getKVCacheHitRatePerRequest();
 
-        auto& specDecMetrics = mPerfMetrics.speculativeDecoding;
+        auto& specDecMetrics = mPerfMetrics->speculativeDecoding;
         if (specDecMetrics.totalDraftTokens != 0)
         {
             specDecMetrics.acceptanceRate
                 = static_cast<float>(specDecMetrics.totalAcceptedDraftTokens) / specDecMetrics.totalDraftTokens;
         }
 
-        result.requestPerfMetrics = mPerfMetrics;
+        result.requestPerfMetrics = *mPerfMetrics;
     }
 
     result.finishReasons = sliceBeams(mFinishReasons);

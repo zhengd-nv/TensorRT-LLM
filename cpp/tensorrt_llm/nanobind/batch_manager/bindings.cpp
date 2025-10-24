@@ -382,6 +382,7 @@ void initBindings(nb::module_& m)
         .def("finish_by_reason", &tb::LlmRequest::finishByReason, nb::arg("finish_reason"))
         .def("set_first_scheduled_time", &tb::LlmRequest::setFirstScheduledTime)
         .def("update_perf_metrics", &tb::LlmRequest::updatePerfMetrics, nb::arg("iter_counter"))
+        .def("get_perf_metrics", &tb::LlmRequest::getPerfMetricsPtr)
         .def("remove_lora_tensors", &tb::LlmRequest::removeLoraTensors)
         .def_rw_static("global_steady_clock_offset", &tb::LlmRequest::sGlobalSteadyClockOffset);
 
